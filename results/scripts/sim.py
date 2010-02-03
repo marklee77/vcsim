@@ -1,5 +1,9 @@
 #!/usr/bin/python
 
+# FIXME: utilization and demand integrals?
+# FIXME: output format
+# FIXME: get rid of hardcoded values
+
 try:
     import psyco
     psyco.full()
@@ -16,26 +20,24 @@ import bisect
 
 import collections
 
+# global time
+time = 0
+
 # global events object
 events = []
 
 # global allocs object
 allocs = set()
 
-restart_delay = 0
-
+# various globals kept for statistics reporting
 jobs_transferred = 0
 tasks_transferred = 0
 mem_transferred = 0
 jobs_restored = 0
 tasks_restored = 0
 mem_restored = 0
-
-time = 0
-
-class HostDict(dict):
-    def __missing__(self, key):
-        return 0
+util_integral = 0
+demand_integral = 0
 
 class Job:
     def __init__(self, id, subtime, tasks, cpu, mem, runtime):
@@ -75,6 +77,13 @@ class Job:
         else:
             return self.usedmsecs
 
+class HostDict(dict):
+    def __missing__(self, key):
+        return 0
+
+    def hostset(self):
+        return set(host for host, count in self.iteritems() if count)
+
 class Alloc:
     def __init__(self, job, cpu, hosts):
 
@@ -87,7 +96,7 @@ class Alloc:
         self.duration = 0
 
     def __str__(self):
-        return (str(self.job.id) + "\t" + str(self.cpu) + "\t" +
+        return (str(self.job) + "\t" + str(self.cpu) + "\t" +
             str(self.job.cpu) + "\t" + str(self.starttime) + "\t" +
             str(self.endtime) + "\t" + str(self.hosts))
 
@@ -105,7 +114,6 @@ def remove_event(event):
 def stop_alloc(alloc):
     global events
     global allocs
-    global precount
     global time
 
     if not alloc:
@@ -125,10 +133,9 @@ def stop_alloc(alloc):
         job.restart_penalty -= duration
         alloc.duration = 0
     else:
-        duration -= job.restart_penalty
-        alloc.duration = duration
+        alloc.duration = duration - job.restart_penalty
         job.restart_penalty = 0
-        job.usedmsecs += int(1000 * duration * alloc.cpu / job.cpu)
+        job.usedmsecs += int(1000 * alloc.duration * alloc.cpu / job.cpu)
 
     if time < alloc.endtime:
         alloc.endtime = time
@@ -166,8 +173,7 @@ def start_alloc(alloc):
     if job.curralloc:
         curralloc = job.curralloc
         # do nothing if current alloc is logically the same
-        if curralloc == alloc or (
-            curralloc.cpu == alloc.cpu and curralloc.hosts == alloc.hosts):
+        if curralloc.cpu == alloc.cpu and curralloc.hosts == alloc.hosts:
             return
         stop_alloc(curralloc)
 
@@ -178,8 +184,8 @@ def start_alloc(alloc):
         if prevalloc.endtime < time:
             job.restart_penalty = restart_delay
             jobs_restored += 1
-            tasks_restored += sum(alloc.hosts.values())
-            mem_restored += job.mem * sum(alloc.hosts.values())
+            tasks_restored += job.tasks
+            mem_restored += job.mem * job.tasks
         elif prevalloc.hosts != alloc.hosts:
             job.restart_penalty = restart_delay
             jobs_transferred += 1
@@ -324,44 +330,50 @@ def allocate_cpu_and_start(numhosts, cputotals, jobhosts, target):
             start_alloc(Alloc(job, max(1, int(minyield * job.cpu)), hosts))
         return
 
+    # FIXME: this increases allocations, not yields...
     if (target == "maxminyield"):
+
         allocs = set()
         cpuloads = [0] * numhosts
-        taskcounts = [0] * numhosts
-        
         for job, hosts in jobhosts.iteritems():
             alloc = Alloc(job, max(1, int(minyield * job.cpu)), hosts)
             allocs.add(alloc)
             for host, count in hosts.iteritems():
                 cpuloads[host] += alloc.cpu * count
-                taskcounts[host] += count
+
+        tmphosts = set(h for h in range(numhosts) if cpuloads[h] < 100)
+        tmpallocs = set(alloc for alloc in allocs 
+            if alloc.cpu < alloc.job.cpu and alloc.hosts.hostset() <= tmphosts)
 
         while True:
 
-            unfilledhosts = set(x for x in range(numhosts) 
-                if taskcounts[x] and (100 - cpuloads[x]) / taskcounts[x])
-            improvableallocs = set(alloc for alloc in allocs 
-                if alloc.cpu < alloc.job.cpu and set(host for host, count 
-                    in alloc.hosts.iteritems() if count > 0) <= unfilledhosts)
+            tmpallocs = set(alloc for alloc in tmpallocs 
+                if alloc.cpu < alloc.job.cpu 
+                    and alloc.hosts.hostset() <= tmphosts)
 
-            if not improvableallocs:
+            if not tmpallocs:
                 break
 
-            hosts = set()
-            for alloc in improvableallocs:
-                hosts |= set(host for host, count in alloc.hosts.iteritems() 
-                    if count > 0)
-            minamtbyhost = min((100 - cpuloads[h]) / taskcounts[h] 
-                for h in hosts)
-            minamtbyalloc = min(alloc.job.cpu - alloc.cpu 
-                for alloc in improvableallocs)
-            improveamt = min(minamtbyhost, minamtbyalloc)
+            taskcounts = [0] * numhosts
+            tmploads = [0] * numhosts
+            
+            for alloc in tmpallocs:
+                for host, count in alloc.hosts.iteritems():
+                    taskcounts[host] += count
+                    tmploads[host] += alloc.cpu * count
 
-            if improveamt == 0:
-                print "uh oh"
-                break
+            tmphosts2 = set(h for h in tmphosts 
+                if 0 < taskcounts[h] <= 100 - cpuloads[h])
 
-            for alloc in improvableallocs:
+            if tmphosts2 < tmphosts:
+                tmphosts = tmphosts2
+                continue
+
+            improveamt = min(
+                min((100 - cpuloads[h]) / taskcounts[h] for h in tmphosts),
+                min(alloc.job.cpu - alloc.cpu for alloc in tmpallocs))
+
+            for alloc in tmpallocs:
                 alloc.cpu += improveamt
                 for host, count in alloc.hosts.iteritems():
                     cpuloads[host] += count * improveamt
@@ -536,7 +548,6 @@ def schedule_job_greedy(numhosts, cputotals, memtotals, job):
         return None
 
     return hosts
-
 
 def schedule_job_greedy_pmtn(numhosts, cputotals, memtotals, jobhosts, job,
     pjobs):
@@ -809,7 +820,7 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
 
     cpuloads = [0] * numhosts
     for job, hosts in jobhosts.iteritems():
-        alloc = Alloc(job, max(1, int(cols[job].primal)), hosts)
+        alloc = Alloc(job, max(1, int(cols[job].primal + 0.5)), hosts)
         start_alloc(alloc)
         for host, count in hosts.iteritems():
             cpuloads[host] += alloc.cpu * count
@@ -820,58 +831,6 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
     return
 
 def schedule_jobs_bs_stretch(numhosts, jobs, jobhosts, period):
-    global time
-    runjobs = jobs.copy()
-    fminavgyield = None
-    fjobcpus = {}
-    fjobhosts = {}
-
-    memtotal = 0
-    for job in runjobs:
-        memtotal += job.mem * job.tasks
-
-    # keeps us from doing a binary search until there is enough
-    # memory for an at least theoretical solution...
-    while memtotal > (numhosts * 100):
-        stopjob = max(runjobs, key=invpri)
-        memtotal -= stopjob.mem * stopjob.tasks
-        runjobs.remove(stopjob)
-
-    while runjobs:
-
-        minavgyieldlb = 0.0
-        minavgyieldub = 1.0
-
-        while minavgyieldub - minavgyieldlb > 0.01:
-            minavgyield = (minavgyieldub + minavgyieldlb) / 2.0
-            allocs = set()
-            for job in runjobs:
-                if job in jobhosts:
-                    hosts = jobhosts[job]
-                else:
-                    hosts = None
-                allocs.add(Alloc(job, max(1, min(job.cpu, int(job.cpu *
-                    float(minavgyield *
-                    (job.ftmsecs() + 1000 * period) - job.vtmsecs()) / 
-                    (1000 * period)))), hosts))
-
-            if mcb8(numhosts, allocs):
-                fminavgyield = minavgyield
-                fjobcpus = dict((alloc.job, alloc.cpu) for alloc in allocs)
-                fjobhosts = dict((alloc.job, alloc.hosts) for alloc in allocs)
-                minavgyieldlb = minavgyield
-            else:
-                del allocs
-                minavgyieldub = minavgyield
-
-        if fjobcpus and fjobhosts:
-            break
-
-        runjobs.remove(max(runjobs, key=invpri))
-
-    return fjobcpus, fjobhosts
-
-def schedule_jobs_bs_stretch2(numhosts, jobs, jobhosts, period):
     global time
     pmsecs = 1000 * period
     runjobs = jobs.copy()
@@ -1013,91 +972,6 @@ def stretch_sched(numhosts, argv):
 
     return
 
-def stretch2_sched(numhosts, argv):
-    global events
-    global time
-
-    jobs = set()
-    jobcpus = {}
-    jobhosts = {}
-    cputotals = [0] * numhosts
-    memtotals = [0] * numhosts
-
-    periodic = False
-    period = 0
-    minvt = 0
-    minft = 0
-
-    for word in argv:
-        if word.startswith("per:"):
-            periodic = True
-            period = int(word[4:])
-        elif word.startswith("minvt:"):
-            minvt = int(word[6:])
-        elif word.startswith("minft:"):
-            minft = int(word[6:])
-    
-    if not periodic:
-        print "ERROR: strech sched must be periodic!"
-        return
-
-    next_per_mcb8_time = 0
-    if periodic:
-        bisect.insort(events, (0, 3))
-
-    pjobs = set()
-
-    while events:
-
-        event = events.pop(0)
-        time = event[0]
-        action = event[1]
-        
-        if action == 0:
-            alloc = event[3]
-            job = alloc.job
-            stop_alloc(alloc)
-            jobs.remove(job)
-            del jobcpus[job]
-            del jobhosts[job]
-        elif action == 2:
-            job = event[3]
-            jobs.add(job)
-        elif action == 3 and (jobs or events):
-            next_per_mcb8_time = time + period
-            bisect.insort(events, (next_per_mcb8_time, 3))
-            if jobs:
-                if minvt > 0:
-                    jobhosts = dict((job, hosts)
-                            for job, hosts in jobhosts.iteritems()
-                            if job.vtmsecs() < 1000 * minvt)
-                elif minft > 0:
-                    jobhosts = dict((job, hosts)
-                            for job, hosts in jobhosts.iteritems()
-                            if job.ftmsecs() < 1000 * minft)
-                else:
-                    jobhosts = dict()
-                jobcpus, jobhosts = schedule_jobs_bs_stretch2(numhosts, jobs,
-                    jobhosts, period)
-                cputotals = [0] * numhosts
-                memtotals = [0] * numhosts
-                for job, hosts in jobhosts.iteritems():
-                    add_job(job, hosts, cputotals, memtotals)
-
-        if events and time == events[0][0]:
-            continue
-
-        for job in jobs - set(jobhosts.keys()):
-            if job.curralloc:
-                stop_alloc(job.curralloc)
-
-        allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
-            next_per_mcb8_time)
-
-    for job in jobs:
-        print "ERROR: job still in queue", job.id, job.usedmsecs, job.runmsecs
-
-    return
 def checkallocs(numhosts, allocs, completed_jobs):
     events = []
     cputotals = [0] * numhosts
@@ -1202,49 +1076,65 @@ schedulers = {
     "easy": easy_sched,
     "smart": smart_sched,
     "mcb8": mcb8_sched,
-    "stretch": stretch_sched,
-    "stretch2": stretch2_sched
+    "stretch": stretch_sched
 }
 
 schedfunc = schedulers[scheduler]
 
-if schedfunc:
-    starttime = modtime.time()
-    schedfunc(numhosts, sys.argv[4:])
-    endtime = modtime.time()
-    comptime = max(0, int(endtime - starttime))
-else:
+if not schedfunc:
     print "scheduler \"%s\" not defined!" % (scheduler)
-    
-runthresh = 30
+    sys.exit(1)
+
+starttime = modtime.time()
+schedfunc(numhosts, sys.argv[4:])
+endtime = modtime.time()
+comptime = max(0, int(endtime - starttime))
+
+checkallocs(numhosts, list(allocs), jobs)
+
+runthresh = 10
+
 stretches = [
     max(1.0, float(job.endtime - job.subtime) / max(runthresh, job.runtime))
     for job in jobs]
+
 starttime = min(job.subtime for job in jobs)
 endtime = max(job.endtime for job in jobs)
-tottime = endtime - starttime
-procutil, cpuutil = checkallocs(numhosts, list(allocs), jobs)
-print min(stretches), "\t",\
-      sum(stretches) / len(stretches), "\t",\
-      max(stretches), "\t",\
-      tottime, "\t",\
-      procutil, "\t",\
-      cpuutil, "\t",\
-      len(allocs), "\t",\
-      comptime, "\t",\
-      jobs_restored, "\t",\
-      tasks_restored, "\t",\
-      mem_restored, "\t",\
-      jobs_transferred, "\t",\
-      tasks_transferred, "\t",\
-      mem_transferred
-#jobstretches = dict(
-#    (job, 
-#        max(1.0, float(job.endtime - job.subtime) / max(runthresh, job.runtime))
-#    ) for job in jobs)
-#jobs.sort(key=(lambda job: jobstretches[job]), reverse=True)
-#for job in jobs:
-#    print job.id, jobstretches[job]
-#for alloc in sorted(allocs,
-#    key=(lambda x: (x.starttime, x.endtime, x.job.id))):
-#    print alloc
+makespan = endtime - starttime
+
+util_integral = 0
+demand_integral = 0
+
+print "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s" % (
+    "jobs",
+    "allocs",
+    "minstretch",
+    "avgstretch",
+    "maxstretch",
+    "makespan",
+    "jrest",
+    "trest",
+    "mrest",
+    "jtrans",
+    "ttrans",
+    "mtrans",
+    "util_integral",
+    "demand_integral",
+    "comptime")
+
+print "%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
+    len(jobs),
+    len(allocs),
+    min(stretches),
+    sum(stretches) / len(stretches),
+    max(stretches),
+    makespan,
+    jobs_restored,
+    tasks_restored,
+    mem_restored,
+    jobs_transferred,
+    tasks_transferred,
+    mem_transferred,
+    util_integral,
+    demand_integral,
+    comptime)
