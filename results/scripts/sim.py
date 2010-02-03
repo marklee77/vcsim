@@ -311,7 +311,7 @@ def easy_sched(numhosts, argv):
         del jobs
         jobs = ujobs
                 
-def allocate_cpu_and_start(numhosts, cputotals, jobhosts):
+def allocate_cpu_and_start(numhosts, cputotals, jobhosts, target):
     global time
 
     if not jobhosts:
@@ -319,9 +319,69 @@ def allocate_cpu_and_start(numhosts, cputotals, jobhosts):
 
     minyield = float(10000 / max(100, *cputotals)) / 100
 
+    if (target == "none"):
+        for job, hosts in jobhosts.iteritems():
+            start_alloc(Alloc(job, max(1, int(minyield * job.cpu)), hosts))
+        return
+
+    if (target == "maxminyield"):
+        allocs = set()
+        cpuloads = [0] * numhosts
+        taskcounts = [0] * numhosts
+        
+        for job, hosts in jobhosts.iteritems():
+            alloc = Alloc(job, max(1, int(minyield * job.cpu)), hosts)
+            allocs.add(alloc)
+            for host, count in hosts.iteritems():
+                cpuloads[host] += alloc.cpu * count
+                taskcounts[host] += count
+
+        while True:
+
+            unfilledhosts = set(x for x in range(numhosts) 
+                if taskcounts[x] and (100 - cpuloads[x]) / taskcounts[x])
+            improvableallocs = set(alloc for alloc in allocs 
+                if alloc.cpu < alloc.job.cpu and set(host for host, count 
+                    in alloc.hosts.iteritems() if count > 0) <= unfilledhosts)
+
+            if not improvableallocs:
+                break
+
+            hosts = set()
+            for alloc in improvableallocs:
+                hosts |= set(host for host, count in alloc.hosts.iteritems() 
+                    if count > 0)
+            minamtbyhost = min((100 - cpuloads[h]) / taskcounts[h] 
+                for h in hosts)
+            minamtbyalloc = min(alloc.job.cpu - alloc.cpu 
+                for alloc in improvableallocs)
+            improveamt = min(minamtbyhost, minamtbyalloc)
+
+            if improveamt == 0:
+                print "uh oh"
+                break
+
+            for alloc in improvableallocs:
+                alloc.cpu += improveamt
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] += count * improveamt
+
+        if max(cpuloads) > 100:
+            print "ERROR: invalid set of allocations at time:", time
+
+        for alloc in allocs:
+            start_alloc(alloc)
+
+        return
+
     prob = pymprog.model('maximize total yield')
     cols = prob.var(jobhosts.keys(), 'alloc')
-    prob.max(sum(cols[job] / job.cpu for job in jobhosts), 'total yield')
+
+    if (target == "util"):
+        prob.max(sum(cols[job] for job in jobhosts), 'total utilization')
+    else:
+        prob.max(sum(cols[job] / job.cpu for job in jobhosts), 'total yield')
+
     prob.st(max(1, int(minyield * job.cpu)) <= cols[job] <= job.cpu 
         for job in jobhosts)
     prob.st(sum(cols[job] * jobhosts[job][host] for job in jobhosts) <= 100
@@ -523,6 +583,8 @@ def smart_sched(numhosts, argv):
     minft = 0
     nomcbmigr = False
 
+    target = "avgyield"
+
     for word in argv:
         if word.startswith("greedy"):
             onsubmit = True
@@ -544,6 +606,8 @@ def smart_sched(numhosts, argv):
             minft = int(word[6:])
         elif word == "nomcbmigr":
             nomcbmigr = True
+        elif word.startswith("opttarget:"):
+            target = word[10:]
     
     if not onsubmit and not periodic:
         print "ERROR: one of onsubmit or periodic must be true!"
@@ -637,7 +701,7 @@ def smart_sched(numhosts, argv):
             if job.curralloc:
                 stop_alloc(job.curralloc)
 
-        allocate_cpu_and_start(numhosts, cputotals, jobhosts)
+        allocate_cpu_and_start(numhosts, cputotals, jobhosts, target)
 
     for job in jobs:
         print "ERROR: job still in queue", job.id, job.usedmsecs, job.runmsecs
@@ -657,6 +721,8 @@ def mcb8_sched(numhosts, argv):
     minft = 0
     nomcbmigr = False
 
+    target = "avgyield"
+
     for word in argv:
         if word.startswith("per:"):
             periodic = True
@@ -667,6 +733,8 @@ def mcb8_sched(numhosts, argv):
             minft = int(word[6:])
         elif word == "nomcbmigr":
             nomcbmigr = True
+        elif word.startswith("opttarget:"):
+            target = word[10:]
     
     if periodic:
         bisect.insort(events, (0, 3))
@@ -715,7 +783,7 @@ def mcb8_sched(numhosts, argv):
                 if job.curralloc:
                     stop_alloc(job.curralloc)
 
-            allocate_cpu_and_start(numhosts, cputotals, jobhosts)
+            allocate_cpu_and_start(numhosts, cputotals, jobhosts, target)
 
     for job in jobs:
         print "ERROR: job still in queue", job.id, job.usedmsecs, job.runmsecs
