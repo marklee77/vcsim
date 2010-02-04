@@ -330,53 +330,94 @@ def allocate_cpu_and_start(numhosts, cputotals, jobhosts, target):
             start_alloc(Alloc(job, max(1, int(minyield * job.cpu)), hosts))
         return
 
-    # FIXME: this increases allocations, not yields...
+    # FIXME:
+    if (target == "maxminyieldx"):
+
+        allocs = set(Alloc(job, None, hosts) 
+            for job, hosts in jobhosts.iteritems())
+        cpuloads = [0] * numhosts
+
+        improvableallocs = allocs.copy()
+        unfilledhosts = set(range(numhosts))
+
+        prevminyield = 0.0
+
+        while improvableallocs:
+
+            cputotals = [0] * numhosts
+            for alloc in improvableallocs:
+                for host, count in alloc.hosts.iteritems():
+                    cputotals[host] += alloc.job.cpu * count
+
+            minyield = float(min(100, min(
+                (100 * (100 - cpuloads[h]) / cputotals[h]) 
+                    for h in unfilledhosts if cputotals[h]))) / 100
+
+            if minyield <= prevminyield:
+                print "problem: ", time, minyield
+
+            for alloc in improvableallocs.copy():
+                alloc.cpu = max(1, int(minyield * alloc.job.cpu))
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] += alloc.cpu * count
+
+            unfilledhosts = set(h for h in unfilledhosts 
+                if cpuloads[h] + int(minyield * cputotals[h]) < 100)
+
+            improvableallocs = set(alloc for alloc in improvableallocs
+                if alloc.cpu < alloc.job.cpu 
+                    and alloc.hosts.hostset() <= unfilledhosts)
+
+            for alloc in improvableallocs:
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] -= alloc.cpu * count
+
+            prevminyield = minyield
+
+        if max(cpuloads) > 100:
+            print "ERROR: invalid set of allocations at time:", time
+
+        for alloc in allocs:
+            start_alloc(alloc)
+
+        return
+
     if (target == "maxminyield"):
 
-        allocs = set()
+        allocs = set(Alloc(job, 1, hosts) 
+            for job, hosts in jobhosts.iteritems())
+        improvableallocs = allocs.copy()
         cpuloads = [0] * numhosts
-        for job, hosts in jobhosts.iteritems():
-            alloc = Alloc(job, max(1, int(minyield * job.cpu)), hosts)
-            allocs.add(alloc)
-            for host, count in hosts.iteritems():
-                cpuloads[host] += alloc.cpu * count
+        unfilledhosts = set(range(numhosts))
+        cputotals = [0] * numhosts
+        for alloc in improvableallocs:
+            for host, count in alloc.hosts.iteritems():
+                cputotals[host] += alloc.job.cpu * count
 
-        tmphosts = set(h for h in range(numhosts) if cpuloads[h] < 100)
-        tmpallocs = set(alloc for alloc in allocs 
-            if alloc.cpu < alloc.job.cpu and alloc.hosts.hostset() <= tmphosts)
+        while improvableallocs:
+                
+            unfilledhosts = set(h for h in unfilledhosts if cputotals[h])
 
-        while True:
+            minyields = dict((host, min(1.0,
+                float(100 * (100 - cpuloads[host]) / cputotals[host]) / 100))
+                for host in unfilledhosts)
 
-            tmpallocs = set(alloc for alloc in tmpallocs 
-                if alloc.cpu < alloc.job.cpu 
-                    and alloc.hosts.hostset() <= tmphosts)
+            minyield = min(minyields.values())
 
-            if not tmpallocs:
-                break
+            filledhosts = set(
+                h for h in unfilledhosts if minyield == minyields[h])
 
-            taskcounts = [0] * numhosts
-            tmploads = [0] * numhosts
-            
-            for alloc in tmpallocs:
+            boundallocs = set(alloc for alloc in improvableallocs
+                if alloc.hosts.hostset() & filledhosts)
+
+            for alloc in boundallocs:
+                alloc.cpu = max(1, int(minyield * alloc.job.cpu))
                 for host, count in alloc.hosts.iteritems():
-                    taskcounts[host] += count
-                    tmploads[host] += alloc.cpu * count
+                    cpuloads[host] += alloc.cpu * count
+                    cputotals[host] -= alloc.job.cpu * count
 
-            tmphosts2 = set(h for h in tmphosts 
-                if 0 < taskcounts[h] <= 100 - cpuloads[h])
-
-            if tmphosts2 < tmphosts:
-                tmphosts = tmphosts2
-                continue
-
-            improveamt = min(
-                min((100 - cpuloads[h]) / taskcounts[h] for h in tmphosts),
-                min(alloc.job.cpu - alloc.cpu for alloc in tmpallocs))
-
-            for alloc in tmpallocs:
-                alloc.cpu += improveamt
-                for host, count in alloc.hosts.iteritems():
-                    cpuloads[host] += count * improveamt
+            unfilledhosts -= filledhosts
+            improvableallocs -= boundallocs
 
         if max(cpuloads) > 100:
             print "ERROR: invalid set of allocations at time:", time
