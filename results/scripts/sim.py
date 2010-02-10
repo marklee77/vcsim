@@ -872,10 +872,8 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
         allocs = set(Alloc(job, 1, hosts) 
             for job, hosts in jobhosts.iteritems())
 
-        improvableallocs = allocs.copy
+        improvableallocs = allocs.copy()
         boundallocs = set()
-        
-        unfilledhosts = set(range(numhosts))
         
         cpuloads = [0] * numhosts
 
@@ -883,8 +881,11 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
 
             prob = pymprog.model('minimize maximum stretch')
             cols = prob.var(alloc.job for alloc in improvableallocs)
-            prob.max(min((alloc.job.vtmsecs() + cols[alloc.job] * T) / 
-                (alloc.job.ftmsecs() + T) for alloc in improvableallocs))
+            Y    = prob.var()
+            prob.max(Y)
+            prob.st((alloc.job.vtmsecs() + 
+                (cols[alloc.job] / alloc.job.cpu) * T) / 
+                (alloc.job.ftmsecs() + T) >= Y for alloc in improvableallocs)
             prob.st(1 <= cols[alloc.job] <= alloc.job.cpu 
                 for alloc in improvableallocs)
             prob.st(sum(cols[alloc.job] * alloc.hosts[host] 
@@ -892,12 +893,31 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
                 for host in range(numhosts))
             prob.solve()
 
-            # ugh, maybe do with stretches...
-            minavgyield = float(int(prob.vobj() * 100)) / 100
+            minavgyield = prob.vobj()
 
-            tmpneeds = dict((alloc, max(1, int((
-                minavgyield * (alloc.job.ftmsecs + T) - alloc.job.vtmsecs) 
-                    / T))) for allc in improvableallocs)
+            for alloc in improvableallocs:
+                alloc.cpu = max(1, min(alloc.job.cpu, int(alloc.job.cpu * (
+                minavgyield * (alloc.job.ftmsecs() + T) - alloc.job.vtmsecs()) 
+                    / T)))
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] += alloc.cpu * count
+
+            filledhosts = set(h for h in range(numhosts) if cpuloads[h] >= 95)
+
+            print [(alloc.job.cpu, alloc.cpu) for alloc in improvableallocs]
+            print cpuloads
+            print filledhosts
+
+            for alloc in improvableallocs.copy():
+                if (alloc.cpu == alloc.job.cpu or 
+                    alloc.hosts.hostset() & filledhosts):
+                    improvableallocs.remove(alloc)
+                else:
+                    for host, count in alloc.hosts.iteritems():
+                        cpuloads[host] -= alloc.cpu * count
+
+        if max(cpuloads) > 100:
+            print "ERROR: invalid set of allocations at time:", time
 
         return allocs
 
