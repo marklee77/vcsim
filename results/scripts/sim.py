@@ -857,6 +857,18 @@ def mcb8_sched(numhosts, argv):
 
     return
 
+def calccpu(job, minavgyield, T):
+    ftmsecs = job.ftmsecs() + T
+    vtsecsneeded = int(minavgyield * ftmsecs) - job.vtmsecs()
+    yieldneeded = float(int(100 * float(vtsecsneeded) / T)) / 100
+    return max(1, int(yieldneeded * job.cpu)) 
+
+def calcavgyield(job, cpu, T):
+    ftmsecs = job.ftmsecs() + T
+    vtmsecs = job.vtmsecs() + T * float(cpu) / job.cpu
+    avgyield = vtmsecs / ftmsecs
+    return float(int(10000 * avgyield)) / 10000
+
 def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
     next_per_mcb8_time, target):
     global time
@@ -873,7 +885,6 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
             for job, hosts in jobhosts.iteritems())
 
         improvableallocs = allocs.copy()
-        boundallocs = set()
         
         cpuloads = [0] * numhosts
 
@@ -885,39 +896,54 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
             prob.max(Y)
             prob.st((alloc.job.vtmsecs() + 
                 (cols[alloc.job] / alloc.job.cpu) * T) / 
-                (alloc.job.ftmsecs() + T) >= Y for alloc in improvableallocs)
+                (alloc.job.ftmsecs() + T) >= Y 
+                for alloc in improvableallocs)
             prob.st(1 <= cols[alloc.job] <= alloc.job.cpu 
                 for alloc in improvableallocs)
-            prob.st(sum(cols[alloc.job] * alloc.hosts[host] 
+            prob.st(sum(cols[alloc.job] * alloc.hosts[host]
                 for alloc in improvableallocs) <= 100 - cpuloads[host]
                 for host in range(numhosts))
             prob.solve()
 
-            minavgyield = prob.vobj()
+            minavgyield = float(int(10000 * prob.vobj())) / 10000
+            
+            print time, minavgyield
 
             for alloc in improvableallocs:
-                alloc.cpu = max(1, min(alloc.job.cpu, int(alloc.job.cpu * (
-                minavgyield * (alloc.job.ftmsecs() + T) - alloc.job.vtmsecs()) 
-                    / T)))
+                alloc.cpu = calccpu(alloc.job, minavgyield, T)
                 for host, count in alloc.hosts.iteritems():
                     cpuloads[host] += alloc.cpu * count
 
-            filledhosts = set(h for h in range(numhosts) if cpuloads[h] >= 95)
+            mylist = [(calcavgyield(alloc.job, alloc.cpu, T), 
+                alloc.job.tasks * alloc.job.cpu, alloc.job.id, alloc)
+                for alloc in improvableallocs]
 
-            print [(alloc.job.cpu, alloc.cpu) for alloc in improvableallocs]
-            print cpuloads
-            print filledhosts
+            mylist.sort()
 
-            for alloc in improvableallocs.copy():
-                if (alloc.cpu == alloc.job.cpu or 
-                    alloc.hosts.hostset() & filledhosts):
+            for avgyield, totalneed, id, alloc in mylist:
+                 doLoop = True
+                 while (doLoop and alloc.cpu < alloc.job.cpu and
+                     calcavgyield(alloc.job, alloc.cpu, T) <= minavgyield):
+                     alloc.cpu += 1
+                     for host, count in alloc.hosts.iteritems():
+                         cpuloads[host] += count
+                     if max(cpuloads) > 100:
+                         doLoop = False
+                         improvableallocs.remove(alloc)
+                         for host, count in alloc.hosts.iteritems():
+                             cpuloads[host] -= count
+                 if alloc.cpu == alloc.job.cpu and alloc in improvableallocs:
                     improvableallocs.remove(alloc)
-                else:
-                    for host, count in alloc.hosts.iteritems():
-                        cpuloads[host] -= alloc.cpu * count
+
+            for alloc in improvableallocs:
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] -= alloc.cpu * count
 
         if max(cpuloads) > 100:
             print "ERROR: invalid set of allocations at time:", time
+
+        for alloc in allocs:
+            start_alloc(alloc)
 
         return allocs
 
