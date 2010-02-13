@@ -865,8 +865,8 @@ def calccpu(job, minavgyield, T):
 
 def calcavgyield(job, cpu, T):
     ftmsecs = job.ftmsecs() + T
-    vtmsecs = job.vtmsecs() + T * float(cpu) / job.cpu
-    avgyield = vtmsecs / ftmsecs
+    vtmsecs = job.vtmsecs() + T * cpu / job.cpu
+    avgyield = float(vtmsecs) / ftmsecs
     return float(int(10000 * avgyield)) / 10000
 
 def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
@@ -879,7 +879,7 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
     if not jobhosts:
         return allocs
 
-    if target == "minmaxstretch":
+    if target == "minmaxstretchX":
 
         allocs = set(Alloc(job, 1, hosts) 
             for job, hosts in jobhosts.iteritems())
@@ -938,6 +938,55 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
             for alloc in improvableallocs:
                 for host, count in alloc.hosts.iteritems():
                     cpuloads[host] -= alloc.cpu * count
+
+        if max(cpuloads) > 100:
+            print "ERROR: invalid set of allocations at time:", time
+
+        for alloc in allocs:
+            start_alloc(alloc)
+
+        return allocs
+
+    if target == "minmaxstretch":
+
+        allocs = set(Alloc(job, 1, hosts) 
+            for job, hosts in jobhosts.iteritems())
+
+        cpuloads = [0] * numhosts
+
+        for alloc in allocs:
+            for host, count in alloc.hosts.iteritems():
+                cpuloads[host] += count
+
+        improvableallocs = set(alloc for alloc in allocs 
+            if alloc.cpu < alloc.job.cpu)
+
+        avgyields = dict((alloc.job, calcavgyield(alloc.job, alloc.cpu, T))
+            for alloc in improvableallocs)
+
+        while improvableallocs:
+
+            minavgyield = min(avgyields.values())
+
+            lowallocs = sorted((alloc for alloc in improvableallocs 
+                if avgyields[alloc.job] == minavgyield), 
+                key=(lambda a: invpri(a.job)))
+            
+            for alloc in lowallocs:
+                alloc.cpu += 1
+                for host, count in alloc.hosts.iteritems():
+                    cpuloads[host] += count
+                if max(cpuloads) > 100:
+                    improvableallocs.remove(alloc)
+                    del avgyields[alloc.job]
+                    alloc.cpu -= 1
+                    for host, count in alloc.hosts.iteritems():
+                        cpuloads[host] -= count
+                elif alloc.cpu == alloc.job.cpu:
+                    improvableallocs.remove(alloc)
+                    del avgyields[alloc.job]
+                else:
+                    avgyields[alloc.job] = calcavgyield(alloc.job, alloc.cpu, T)
 
         if max(cpuloads) > 100:
             print "ERROR: invalid set of allocations at time:", time
@@ -1028,6 +1077,8 @@ def schedule_jobs_bs_stretch(numhosts, jobs, jobhosts, period):
 def stretch_sched(numhosts, argv):
     global events
     global time
+    global util_integral
+    global demand_integral
 
     jobs = set()
     jobcpus = {}
@@ -1107,9 +1158,17 @@ def stretch_sched(numhosts, argv):
             if job.curralloc:
                 stop_alloc(job.curralloc)
 
-        allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
-            next_per_mcb8_time, target)
+        currallocs = allocate_cpu_and_start_stretch(numhosts, cputotals, 
+            jobhosts, jobcpus, next_per_mcb8_time, target)
 
+        if events:
+            utilization = sum(alloc.cpu * alloc.job.tasks 
+                for alloc in currallocs)
+            demand = min(numhosts * 100, 
+                sum(job.cpu * job.tasks for job in jobs))
+            duration = events[0][0] - time
+            util_integral += utilization * duration
+            demand_integral += demand * duration
     for job in jobs:
         print "ERROR: job still in queue", job.id, job.usedmsecs, job.runmsecs
 
