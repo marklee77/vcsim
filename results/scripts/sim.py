@@ -1,6 +1,5 @@
 #!/usr/bin/python
 
-# FIXME: utilization and demand integrals?
 # FIXME: get rid of hardcoded values
 # FIXME: remove idle time from util calculations
 
@@ -431,6 +430,9 @@ def allocate_cpu_and_start(numhosts, cputotals, jobhosts, target):
     #prob.solvopt(method='interior')
     prob.solve()
 
+    status = prob.status()
+    if status != "opt":
+        print "ERROR: ", time, status
     cpuloads = [0] * numhosts
     for job, hosts in jobhosts.iteritems():
         alloc = Alloc(job, max(1, int(cols[job].primal)), hosts)
@@ -517,7 +519,7 @@ def schedule_jobs_bs(numhosts, jobs, jobhosts):
 
     # keeps us from doing a binary search until there is enough
     # memory for an at least theoretical solution...
-    while memtotal > (numhosts * 100):
+    while runjobs and memtotal > (numhosts * 100):
         stopjob = max(runjobs, key=invpri)
         memtotal -= stopjob.mem * stopjob.tasks
         runjobs.remove(stopjob)
@@ -542,9 +544,6 @@ def schedule_jobs_bs(numhosts, jobs, jobhosts):
                 minyieldlb = minyield
             else:
                 del allocs
-# FIXME: why not just stop if you fail after succeeding?
-                if fjobhosts:
-                    break
                 minyieldub = minyield
 
         if fjobhosts:
@@ -771,6 +770,10 @@ def mcb8_sched(numhosts, argv):
 
     jobs = set()
     jobhosts = {}
+    cputotals = [0] * numhosts
+    memtotals = [0] * numhosts
+
+    activeres = False
 
     periodic = False
     period = 0
@@ -781,7 +784,9 @@ def mcb8_sched(numhosts, argv):
     target = "avgyield"
 
     for word in argv:
-        if word.startswith("per:"):
+        if word == "activeres":
+            activeres = True
+        elif word.startswith("per:"):
             periodic = True
             period = int(word[4:])
         elif word.startswith("minvt:"):
@@ -793,6 +798,9 @@ def mcb8_sched(numhosts, argv):
         elif word.startswith("opttarget:"):
             target = word[10:]
     
+    if not activeres and not periodic:
+        print "ERROR: one of activeres or periodic must be true!"
+
     if periodic:
         bisect.insort(events, (0, 3))
 
@@ -801,12 +809,14 @@ def mcb8_sched(numhosts, argv):
         event = events.pop(0)
         time = event[0]
         action = event[1]
-        
+
         if action == 0:
             alloc = event[3]
             job = alloc.job
             stop_alloc(alloc)
             jobs.remove(job)
+            remove_job(job, alloc.hosts, cputotals, memtotals)
+            del jobhosts[job]
         elif action == 2:
             job = event[3]
             jobs.add(job)
@@ -818,18 +828,20 @@ def mcb8_sched(numhosts, argv):
 
         if jobs:
 
-            if minvt > 0:
-                jobhosts = dict((job, hosts)
-                        for job, hosts in jobhosts.iteritems()
-                        if job.vtmsecs() < 1000 * minvt)
-            elif minft > 0:
-                jobhosts = dict((job, hosts)
-                        for job, hosts in jobhosts.iteritems()
-                        if job.ftmsecs() < 1000 * minft)
-            elif not nomcbmigr:
-                jobhosts = dict()
+            if action or activeres:
 
-            jobhosts = schedule_jobs_bs(numhosts, jobs, jobhosts)
+                if minvt > 0:
+                    jobhosts = dict((job, hosts)
+                            for job, hosts in jobhosts.iteritems()
+                            if job.vtmsecs() < 1000 * minvt)
+                elif minft > 0:
+                    jobhosts = dict((job, hosts)
+                            for job, hosts in jobhosts.iteritems()
+                            if job.ftmsecs() < 1000 * minft)
+                elif not nomcbmigr:
+                    jobhosts = dict()
+
+                jobhosts = schedule_jobs_bs(numhosts, jobs, jobhosts)
 
             cputotals = [0] * numhosts
             memtotals = [0] * numhosts
@@ -877,74 +889,6 @@ def allocate_cpu_and_start_stretch(numhosts, cputotals, jobhosts, jobcpus,
     allocs = set()
 
     if not jobhosts:
-        return allocs
-
-    if target == "minmaxstretchX":
-
-        allocs = set(Alloc(job, 1, hosts) 
-            for job, hosts in jobhosts.iteritems())
-
-        improvableallocs = allocs.copy()
-        
-        cpuloads = [0] * numhosts
-
-        while improvableallocs:
-
-            prob = pymprog.model('minimize maximum stretch')
-            cols = prob.var(alloc.job for alloc in improvableallocs)
-            Y    = prob.var()
-            prob.max(Y)
-            prob.st((alloc.job.vtmsecs() + 
-                (cols[alloc.job] / alloc.job.cpu) * T) / 
-                (alloc.job.ftmsecs() + T) >= Y 
-                for alloc in improvableallocs)
-            prob.st(1 <= cols[alloc.job] <= alloc.job.cpu 
-                for alloc in improvableallocs)
-            prob.st(sum(cols[alloc.job] * alloc.hosts[host]
-                for alloc in improvableallocs) <= 100 - cpuloads[host]
-                for host in range(numhosts))
-            prob.solve()
-
-            minavgyield = float(int(10000 * prob.vobj())) / 10000
-            
-            print time, minavgyield
-
-            for alloc in improvableallocs:
-                alloc.cpu = calccpu(alloc.job, minavgyield, T)
-                for host, count in alloc.hosts.iteritems():
-                    cpuloads[host] += alloc.cpu * count
-
-            mylist = [(calcavgyield(alloc.job, alloc.cpu, T), 
-                alloc.job.tasks * alloc.job.cpu, alloc.job.id, alloc)
-                for alloc in improvableallocs]
-
-            mylist.sort()
-
-            for avgyield, totalneed, id, alloc in mylist:
-                 doLoop = True
-                 while (doLoop and alloc.cpu < alloc.job.cpu and
-                     calcavgyield(alloc.job, alloc.cpu, T) <= minavgyield):
-                     alloc.cpu += 1
-                     for host, count in alloc.hosts.iteritems():
-                         cpuloads[host] += count
-                     if max(cpuloads) > 100:
-                         doLoop = False
-                         improvableallocs.remove(alloc)
-                         for host, count in alloc.hosts.iteritems():
-                             cpuloads[host] -= count
-                 if alloc.cpu == alloc.job.cpu and alloc in improvableallocs:
-                    improvableallocs.remove(alloc)
-
-            for alloc in improvableallocs:
-                for host, count in alloc.hosts.iteritems():
-                    cpuloads[host] -= alloc.cpu * count
-
-        if max(cpuloads) > 100:
-            print "ERROR: invalid set of allocations at time:", time
-
-        for alloc in allocs:
-            start_alloc(alloc)
-
         return allocs
 
     if target == "minmaxstretch":
