@@ -7,9 +7,9 @@ for DELAY in 0 300; do
     for DATASET in lubtraces-128 lubscaled-128 hpc2n-120; do
 ${MYSQL} > dfbest-${DELAY}-${DATASET}.txt  <<EOF
     select algo,
-           format(avg(maxstretch / minmaxstretch), 2),
-           format(stddev_samp(maxstretch / minmaxstretch), 2),
-           format(max(maxstretch / minmaxstretch), 2)
+           format(avg(maxstretch / minmaxstretch), 1),
+           format(stddev_samp(maxstretch / minmaxstretch), 1),
+           format(max(maxstretch / minmaxstretch), 1)
     from solutions, (
         select dataset, delay, trace, min(maxstretch) as minmaxstretch 
         from solutions
@@ -25,17 +25,17 @@ ${MYSQL} > dfbest-${DELAY}-${DATASET}.txt  <<EOF
     order by replace(algo, "_", " ");
 EOF
     done 
-  join dfbest-${DELAY}-lubscaled-128.txt dfbest-${DELAY}-lubtraces-128.txt |\
-  join - dfbest-${DELAY}-hpc2n-120.txt |\
+  join dfbest-${DELAY}-hpc2n-120.txt dfbest-${DELAY}-lubtraces-128.txt |\
+  join - dfbest-${DELAY}-lubscaled-128.txt |\
   perl -pe 's/ /&/g; s/_/ /g; s/\n/\\\\\n/;' >\
   ${SAVEDIR}/deg-from-best-${DELAY}-delay.tex
 
     for DATASET in lubtraces-128 lubscaled-128 hpc2n-120; do
 ${MYSQL} > dfbound-${DELAY}-${DATASET}.txt <<EOF
     select algo,
-           format(avg(maxstretch / msbound), 2),
-           format(stddev_samp(maxstretch / msbound), 2),
-           format(max(maxstretch / msbound), 2)
+           format(avg(maxstretch / msbound), 1),
+           format(stddev_samp(maxstretch / msbound), 1),
+           format(max(maxstretch / msbound), 1)
     from problems, solutions
     where problems.dataset = solutions.dataset
       and problems.trace = solutions.trace 
@@ -46,8 +46,8 @@ ${MYSQL} > dfbound-${DELAY}-${DATASET}.txt <<EOF
     order by replace(algo, "_", " ");
 EOF
     done 
-  join dfbound-${DELAY}-lubscaled-128.txt dfbound-${DELAY}-lubtraces-128.txt |\
-  join - dfbound-${DELAY}-hpc2n-120.txt |\
+  join dfbound-${DELAY}-hpc2n-120.txt dfbound-${DELAY}-lubtraces-128.txt |\
+  join - dfbound-${DELAY}-lubscaled-128.txt |\
   perl -pe 's/ /&/g; s/_/ /g; s/\n/\\\\\n/;' >\
   ${SAVEDIR}/deg-from-bound-${DELAY}-delay.tex
 

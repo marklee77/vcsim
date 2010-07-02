@@ -6,14 +6,13 @@ ALGOS=$(cat <<EOF
 fcfs
 easy
 greedy_activeres_opttarget:maxminyield
-greedy-pmtn_activeres_opttarget:maxminyield
-greedy-pmtn_opttarget:maxminyield_per:600
-greedy-pmtn_activeres_opttarget:maxminyield_per:600
-greedy-pmtn_activeres_opttarget:maxminyield_per:600_minvt:300
-mcb8_activeres_opttarget:maxminyield_per:600
-mcb8_activeres_opttarget:maxminyield_per:600_minvt:300
-opttarget:maxminyield_per:600
-stretch_opttarget:minmaxstretch_per:600
+greedy-pmtn-migr_activeres_opttarget:maxminyield
+greedy_activeres_opttarget:maxminyield_per:600
+greedy-pmtn-migr_activeres_opttarget:maxminyield_per:600
+greedy-pmtn-migr_activeres_opttarget:maxminyield_per:600_minvt:600
+mcb8_activeres_opttarget:maxminyield_per:600_minvt:600
+opttarget:maxminyield_per:600_minvt:600
+stretch_opttarget:minmaxstretch_per:600_minvt:600
 EOF
 )
 
@@ -132,10 +131,10 @@ EOF
         done
         echo
 
-        echo "set ylabel \"Maxstretch Degredation From Bound\""
+        echo "set ylabel \"Maxstretch degradation From Bound\""
         echo "set yrange [1:10000]"
 
-        echo "set title \"Maximum Degredation From Bound vs. System Load, ${DELAY} second restart penalty.\""
+        echo "set title \"Maximum degradation From Bound vs. System Load, ${DELAY} second restart penalty.\""
         echo "set output \"maxsdfbound-vs-load-${DELAY}-delay.${EXT}\""
         echo -n "plot "
         FILES=($(ls ${DFBOUNDDIR}/*.dat))
@@ -154,8 +153,8 @@ EOF
 
         echo "set yrange [1:10000]"
 
-        echo "set ylabel \"Average Stretch Degredation From Best\""
-        echo "set title \"Average Stretch Degredation Factor vs. System Load, ${DELAY} second restart penalty.\""
+        echo "set ylabel \"Average Stretch degradation From Best\""
+        echo "set title \"Average Stretch degradation Factor vs. System Load, ${DELAY} second restart penalty.\""
         echo "set output \"avgsdfbest-vs-load-${DELAY}-delay.${EXT}\""
         echo -n "plot "
         FILES=($(ls ${DFBESTDIR}/*.dat))
@@ -172,8 +171,8 @@ EOF
         done
         echo
 
-        echo "set ylabel \"Maximum Stretch Degredation From Best\""
-        echo "set title \"Maximum Stretch Degredation Factor vs. System Load, ${DELAY} second restart penalty.\""
+        echo "set ylabel \"Maximum Stretch degradation From Best\""
+        echo "set title \"Maximum Stretch degradation Factor vs. System Load, ${DELAY} second restart penalty.\""
         echo "set output \"maxsdfbest-vs-load-${DELAY}-delay.${EXT}\""
         echo -n "plot "
         FILES=($(ls ${DFBESTDIR}/*.dat))
